@@ -49,6 +49,9 @@ const LEDGER_NORMALIZATION_MAP: Record<string, string> = {
   'CANDY-Prod': 'candy-prod',
   'CANDY-Dev': 'candy-dev',
   'CANDY-Test': 'candy-test',
+  'CANdy-Prod': 'candy-prod',
+  'CANdy-Dev': 'candy-dev',
+  'CANdy-Test': 'candy-test',
   'Candy:Prod': 'candy-prod',
   'Candy:Dev': 'candy-dev',
   'Candy:Test': 'candy-test',
@@ -233,19 +236,40 @@ export function extractLedgerFromReadme(readmeContent: string): { ledger?: strin
 
     // Check if this line contains the table header
     if (line.includes("| Identifier") && line.includes("| Location") && line.includes("| URL")) {
-      // Look for the next non-empty line after the separator line
+      const tableRows: { ledger: string; ledgerUrl: string }[] = [];
+
+      // Collect all table rows
       for (let j = i + 2; j < lines.length; j++) {
         const dataLine = lines[j].trim();
         if (dataLine && dataLine.includes("|") && !dataLine.includes("---")) {
           // Parse the table row
           const parts = dataLine.split("|").map(p => p.trim()).filter(p => p);
           if (parts.length >= 3) {
-            ledger = parts[1]; // Location column
-            ledgerUrl = parts[2]; // URL column
-            break;
+            tableRows.push({
+              ledger: parts[1], // Location column
+              ledgerUrl: parts[2] // URL column
+            });
           }
+        } else if (dataLine === "" || !dataLine.includes("|")) {
+          // End of table
+          break;
         }
       }
+
+      // Prioritize Candy Production entries, then fall back to first entry
+      const candyRow = tableRows.find(row =>
+        row.ledger.toLowerCase().includes('candy') &&
+        row.ledger.toLowerCase().includes('prod')
+      );
+
+      if (candyRow) {
+        ledger = candyRow.ledger;
+        ledgerUrl = candyRow.ledgerUrl;
+      } else if (tableRows.length > 0) {
+        ledger = tableRows[0].ledger;
+        ledgerUrl = tableRows[0].ledgerUrl;
+      }
+
       break;
     }
   }
@@ -267,6 +291,7 @@ export async function fetchSchemaReadme(ocabundle: string): Promise<{ ledger?: s
 
     const response = await fetch(readmeUrl);
     if (!response.ok) {
+      console.warn(`README not found for ${ocabundle}: ${response.status} ${response.statusText}`);
       const emptyResult = {};
       readmeCache.set(ocabundle, emptyResult);
       return emptyResult;
@@ -275,10 +300,17 @@ export async function fetchSchemaReadme(ocabundle: string): Promise<{ ledger?: s
     const readmeContent = await response.text();
     const ledgerInfo = extractLedgerFromReadme(readmeContent);
 
+    if (!ledgerInfo.ledger) {
+      console.warn(`No ledger info extracted from README: ${readmeUrl}`);
+    } else {
+      console.log(`Found ledger info for ${ocabundle}: ${ledgerInfo.ledger}`);
+    }
+
     // Cache the result
     readmeCache.set(ocabundle, ledgerInfo);
     return ledgerInfo;
   } catch (error) {
+    console.error(`Error fetching README for ${ocabundle}:`, error);
     const emptyResult = {};
     readmeCache.set(ocabundle, emptyResult);
     return emptyResult;
@@ -288,13 +320,59 @@ export async function fetchSchemaReadme(ocabundle: string): Promise<{ ledger?: s
 // Enhanced function to fetch bundle list with ledger information
 export async function fetchOverlayBundleList(): Promise<BundleWithLedger[]> {
   try {
-    const response = await fetch(BUNDLE_LIST_URL + "/" + BUNDLE_LIST_FILE);
+    // Add multiple cache-busting strategies to ensure fresh data
+    const cacheBuster = Date.now();
+    const randomSuffix = Math.random().toString(36).substring(7);
+    const url = `${BUNDLE_LIST_URL}/${BUNDLE_LIST_FILE}?t=${cacheBuster}&r=${randomSuffix}&nocache=1`;
+
+    const response = await fetch(url, {
+      headers: {
+        'Cache-Control': 'no-cache, no-store, must-revalidate',
+        'Pragma': 'no-cache',
+        'Expires': '0'
+      }
+    });
+
     if (!response.ok) {
       throw new Error(`HTTP error! status: ${response.status}`);
     }
 
     const body = await response.text();
-    const options: any[] = JSON.parse(body);
+
+    // Validate response content
+    if (!body || body.trim().length === 0) {
+      throw new Error('Empty response body from bundle data source');
+    }
+
+    let options: any[];
+    try {
+      options = JSON.parse(body);
+    } catch (parseError) {
+      console.error('Failed to parse bundle data JSON:', parseError);
+      throw new Error('Invalid JSON response from bundle data source');
+    }
+
+    // Validate parsed data
+    if (!Array.isArray(options)) {
+      throw new Error('Bundle data is not an array');
+    }
+
+    if (options.length === 0) {
+      throw new Error('Bundle data array is empty');
+    }
+
+    console.log(`Successfully fetched ${options.length} bundles from source`);
+
+    // Debug log to help diagnose build issues
+    if (process.env.NODE_ENV === 'development' || process.env.CI) {
+      const vancouverBundles = options.filter(b => b.org && b.org.includes('Vancouver'));
+      console.log(`Vancouver bundles found: ${vancouverBundles.length}`);
+      if (vancouverBundles.length > 0) {
+        console.log('First Vancouver bundle ID:', vancouverBundles[0].id);
+      }
+      // Log first few bundle IDs to help diagnose data source issues
+      console.log('First 3 bundle IDs:', options.slice(0, 3).map(b => b.id));
+    }
 
     // Group bundles by ocabundle path and collect all IDs for each unique OCA bundle
     const bundleGroups = options.reduce((acc, bundle) => {
