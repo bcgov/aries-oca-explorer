@@ -6,6 +6,13 @@ class OverlayBundleFactory {
     url: string
   ): Promise<any> {
     const response = await fetch(url);
+    if (!response.ok) {
+      throw new Error(
+        response.status === 404
+          ? `OCA bundle not found at ${url}`
+          : `Failed to fetch OCA bundle from ${url} (HTTP ${response.status})`
+      );
+    }
     return await response.json();
   }
 
